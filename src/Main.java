@@ -1,8 +1,12 @@
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
+import java.util.HashMap;
 
 public class Main {
+
     public static String byteToHex(byte b) {
         return Integer.toHexString(b & 0xff);
     }
@@ -10,6 +14,7 @@ public class Main {
     public static int byteToInt(byte b) {
         return b & 0xff;
     }
+
 
     static class ULEB128Coder{
         private final static int BIT_MASK = 0x7f;
@@ -47,8 +52,20 @@ public class Main {
     }
 
     static abstract class struct {
-        int size = 0;
-        abstract byte[] toBytes();
+        protected int size = 0;
+        public abstract byte[] toBytes();
+        protected byte[] combineByteArrays(int size, byte[] ... k) {
+            byte[] res = new byte[size];
+            ByteBuffer buff = ByteBuffer.wrap(res);
+            for (byte[] b: k) {
+                buff.put(b);
+            }
+            return buff.array();
+        }
+
+        protected byte[] asArray(byte b) {
+            return new byte[]{b};
+        }
     }
     static class Packet extends struct{
         int length;
@@ -63,23 +80,126 @@ public class Main {
 
         @Override
         public byte[] toBytes() {
-            byte[] res = new byte[this.size];
-            ByteBuffer buff = ByteBuffer.wrap(res);
-            buff.put((byte)this.length);
-            buff.put(this.payload.toBytes());
-            buff.put((byte)crc8);
-            return buff.array();
+            return combineByteArrays(size, asArray((byte)this.length), this.payload.toBytes(), asArray((byte)crc8));
+        }
+    }
+
+    static abstract class Device extends struct{
+        String devName;
+        public void setName(byte[] bytes) {
+            int len = byteToInt(bytes[0]);
+            this.devName = new String(Arrays.copyOfRange(bytes, 0, len), StandardCharsets.UTF_8);
+        }
+    }
+
+    static class DeviceFabric {
+        public Device createDevice(int devType, int cmd, byte[] bytes) {
+            Device device = null;
+            switch (devType) {
+                case 1 -> device = new SmartHub(cmd, bytes);
+                case 2 -> device = new EnvSensor(cmd, bytes);
+                case 3 -> device = new Switch(cmd, bytes);
+                case 4 -> device = new Lamp(cmd, bytes);
+                case 5 -> device = new Socket(cmd, bytes);
+                case 6 -> device = new Clock(cmd, bytes);
+            }
+            return device;
+        }
+    }
+
+    static class SmartHub extends Device{
+
+        public SmartHub(int cmd, byte[] bytes) {
+            this.size = bytes.length;
+            setName(bytes);
+        }
+        @Override
+        public byte[] toBytes() {
+            return combineByteArrays(this.size, devName.getBytes());
+        }
+    }
+
+    static class EnvSensor extends Device {
+        int sensors;
+        Trigger[] triggers;
+        long[] values;
+        public EnvSensor(int cmd, byte[] bytes) {
+            this.size = bytes.length;
+
+        }
+
+        @Override
+        public byte[] toBytes() {
+            return new byte[0];
+        }
+    }
+
+    static class Switch extends Device {
+        int turnOn;
+        String[] devNames;
+        public Switch(int cmd, byte[] bytes) {
+            this.size = bytes.length;
+        }
+
+        @Override
+        public byte[] toBytes() {
+            return new byte[0];
+        }
+    }
+
+    static class Lamp extends Device {
+        int turnOn;
+        public Lamp(int cmd, byte[] bytes) {
+            this.size = bytes.length;
+
+        }
+
+        @Override
+        public byte[] toBytes() {
+            return new byte[0];
+        }
+    }
+
+    static class Socket extends Device {
+        int turnOn;
+        public Socket(int cmd, byte[] bytes) {
+            this.size = bytes.length;
+        }
+
+        @Override
+        public byte[] toBytes() {
+            return new byte[0];
+        }
+    }
+
+    static class Clock extends Device {
+        long timestamp;
+        public Clock(int cmd, byte[] bytes) {
+            this.size = bytes.length;
+            if (cmd == 1) {
+                setName(bytes);
+            } else if (cmd == 6) {
+                timestamp = ULEB128Coder.decode(bytes);
+            } else {
+                //TODO write exception
+            }
+        }
+
+        @Override
+        public byte[] toBytes() {
+            //TODO rewrite convert to bytes
+            return combineByteArrays(this.size, ULEB128Coder.encode(timestamp));
         }
     }
 
     static class Payload extends struct{
+        private final DeviceFabric deviceFabric = new DeviceFabric();
         long src;
         long dst;
         int serial;
         int devType;
         int cmd;
-        struct cmdBody;
-
+        Device device;
         public Payload(byte[] bytes) {
             this.size = bytes.length;
             this.src = ULEB128Coder.decode(Arrays.copyOfRange(bytes, 0, 2));
@@ -87,88 +207,16 @@ public class Main {
             this.serial = byteToInt(bytes[4]);
             this.devType = byteToInt(bytes[5]);
             this.cmd = byteToInt(bytes[6]);
-            initCmdBody(Arrays.copyOfRange(bytes, 7, bytes.length));
-        }
-
-        private void initCmdBody(byte[] bytes) {
-            if (this.cmd == 6) {
-                this.cmdBody = new TimeCmdBody(bytes);
-            } else {
-                this.cmdBody = new DeviceCmdBody(bytes);
-            }
+            this.device = deviceFabric.createDevice(devType, cmd, Arrays.copyOfRange(bytes,7, bytes.length));
         }
         @Override
         public byte[] toBytes() {
-            byte[] res = new byte[this.size];
-            ByteBuffer buff = ByteBuffer.wrap(res);
-            buff.put(ULEB128Coder.encode(this.src));
-            buff.put(ULEB128Coder.encode(this.dst));
-            buff.put(ULEB128Coder.encode((byte)serial));
-            buff.put(ULEB128Coder.encode((byte)devType));
-            buff.put(ULEB128Coder.encode((byte)cmd));
-            buff.put(cmdBody.toBytes());
-            return buff.array();
-        }
-    }
-    static class TimeCmdBody extends struct{
-        long timestamp;
-
-        public TimeCmdBody(byte[] bytes) {
-            this.size = bytes.length;
-            this.timestamp = ULEB128Coder.decode(bytes);
-        }
-
-        @Override
-        public byte[] toBytes() {
-            byte[] res = new byte[this.size];
-            ByteBuffer buff = ByteBuffer.wrap(res);
-            buff.put(ULEB128Coder.encode(timestamp));
-            return buff.array();
+            return combineByteArrays(size, ULEB128Coder.encode(this.src), ULEB128Coder.encode(this.dst),
+                    asArray((byte)this.serial), asArray((byte) this.devType),
+                    asArray((byte)this.cmd),this.device.toBytes());
         }
     }
 
-    static class DeviceCmdBody extends struct{
-        int stringLen;
-        String devName;
-        EnvSensorProps devProps;
-        public DeviceCmdBody(byte[] bytes) {
-            this.size = bytes.length;
-            this.stringLen = bytes[0];
-            devName = Arrays.toString(Arrays.copyOfRange(bytes, 0, this.stringLen));
-            devProps = new EnvSensorProps(Arrays.copyOfRange(bytes, this.stringLen, bytes.length));
-        }
-
-        @Override
-        public byte[] toBytes() {
-            byte[] res = new byte[this.size];
-            ByteBuffer buff = ByteBuffer.wrap(res);
-            buff.put((byte)this.stringLen);
-            buff.put(this.devName.getBytes());
-            buff.put(this.devProps.toBytes());
-            return buff.array();
-        }
-    }
-
-    static class EnvSensorProps extends struct{
-        int sensors;
-        Trigger[] triggers;
-
-        public EnvSensorProps(byte[] bytes) {
-            this.size = bytes.length;
-            this.sensors = byteToInt(bytes[0]);
-        }
-
-        @Override
-        public byte[] toBytes() {
-            byte[] res = new byte[this.size];
-            ByteBuffer buff = ByteBuffer.wrap(res);
-            buff.put((byte)this.sensors);
-            for (Trigger t: this.triggers) {
-                buff.put(t.toBytes());
-            }
-            return buff.array();
-        }
-    }
 
     class Trigger extends struct {
         int op;
@@ -191,8 +239,12 @@ public class Main {
         for (byte b: res) {
             System.out.print(byteToHex(b) + " ");
         }
+        System.out.println();
+        String s = Base64.getUrlEncoder().withoutPadding().encodeToString(res);
+        System.out.println(s);
+        res = Base64.getUrlDecoder().decode(s);
+        for (byte b: res) {
+            System.out.print(byteToHex(b) + " ");
+        }
     }
-
-
-
 }
